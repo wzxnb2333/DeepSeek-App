@@ -3,9 +3,16 @@
 This runbook sets up a Tencent Cloud Lighthouse instance in Hong Kong as an
 always-on DeepSeek TUI host controlled from Feishu/Lark on a phone.
 
+If you are teaching this as the Tencent-native default path, start with
+[docs/TENCENT_CLOUD_REMOTE_FIRST.md](TENCENT_CLOUD_REMOTE_FIRST.md). This file
+is the implementation runbook for the Lighthouse host itself.
+
 ## Target Architecture
 
 ```text
+CNB mirror or GitHub branch
+  -> /opt/whalebro/deepseek-tui
+
 Feishu/Lark mobile app
   -> Feishu/Lark long-connection bot
   -> deepseek-feishu-bridge systemd service
@@ -13,10 +20,14 @@ Feishu/Lark mobile app
   -> /opt/whalebro
        -> deepseek-tui/
        -> whalescale/ when product work is needed
+
+Optional public edge:
+EdgeOne -> Caddy/Nginx public site on Lighthouse
 ```
 
 The runtime API must stay on `127.0.0.1`. The bridge is the only phone-facing
-surface.
+control surface. EdgeOne is optional and should only front a deliberate public
+HTTP service, not the runtime API.
 
 ## Remote Whalebro Workspace
 
@@ -79,21 +90,37 @@ SSH into the Lighthouse instance and run:
 sudo apt-get update
 sudo apt-get install -y git
 export DEEPSEEK_BRANCH=work/v0.8.36-feishu-lighthouse
-git clone --branch "$DEEPSEEK_BRANCH" https://github.com/Hmbown/DeepSeek-TUI.git /tmp/deepseek-tui
+export DEEPSEEK_REPO_URL=https://github.com/Hmbown/DeepSeek-TUI.git
+git clone --branch "$DEEPSEEK_BRANCH" "$DEEPSEEK_REPO_URL" /tmp/deepseek-tui
 cd /tmp/deepseek-tui
-sudo DEEPSEEK_REPO_BRANCH="$DEEPSEEK_BRANCH" bash scripts/tencent-lighthouse/bootstrap-ubuntu.sh
+sudo DEEPSEEK_REPO_URL="$DEEPSEEK_REPO_URL" \
+  DEEPSEEK_REPO_BRANCH="$DEEPSEEK_BRANCH" \
+  bash scripts/tencent-lighthouse/bootstrap-ubuntu.sh
 ```
 
 If you also want `whalescale` cloned during bootstrap, pass it explicitly:
 
 ```bash
-sudo DEEPSEEK_REPO_BRANCH="$DEEPSEEK_BRANCH" \
+sudo DEEPSEEK_REPO_URL="$DEEPSEEK_REPO_URL" \
+  DEEPSEEK_REPO_BRANCH="$DEEPSEEK_BRANCH" \
   WHALEBRO_EXTRA_REPOS='whalescale=https://github.com/Hmbown/whalescale.git' \
   bash scripts/tencent-lighthouse/bootstrap-ubuntu.sh
 ```
 
 Use SSH repo URLs instead if either repo is private or you want push access
 from the VPS.
+
+For the stable Tencent-first path, use the CNB mirror URL once the branch or
+tag exists there:
+
+```bash
+export DEEPSEEK_REPO_URL=https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git
+git ls-remote "$DEEPSEEK_REPO_URL" refs/heads/main refs/tags/v0.8.36
+```
+
+The current CNB mirror receives `main` and release tags by default. Feature
+branches may need to be mirrored manually or cloned from GitHub until they are
+merged or tagged.
 
 If this deployment setup has not been pushed to Git yet, either push the branch
 first or copy this checkout to the VPS before running these commands. A fresh
@@ -210,6 +237,42 @@ Useful commands:
 
 Use `remember` only when you intentionally want the runtime thread to flip
 toward auto-approval for future tools.
+
+## CNB Deploy Button
+
+After the manual Lighthouse setup passes, CNB can become the repeatable deploy
+button:
+
+1. Copy `deploy/tencent-lighthouse/cnb/cnb.yml.example` to `.cnb.yml` in the
+   CNB repo.
+2. Copy `deploy/tencent-lighthouse/cnb/tag_deploy.yml.example` to
+   `.cnb/tag_deploy.yml`.
+3. Configure the CNB deploy secrets documented in
+   `deploy/tencent-lighthouse/cnb/README.md`.
+4. Trigger the `lighthouse-hk` deployment environment.
+
+Keep this manual until the server is boring. Automatic deploys on every push
+are convenient later, but they can consume CNB quota and restart the bridge
+while a phone turn is active.
+
+## EdgeOne
+
+EdgeOne is not required for the first Feishu/Lark long-connection setup. Add it
+only when you need a public HTTPS domain in front of a deliberate public
+service on the Lighthouse host.
+
+Good EdgeOne uses:
+
+- public docs or tutorial site
+- tiny operator status page
+- future webhook-mode bridge endpoint
+- demo web app hosted on the same Lighthouse instance
+
+Do not use EdgeOne to expose:
+
+- `http://127.0.0.1:7878`
+- `/v1/*` runtime endpoints
+- any endpoint that accepts `DEEPSEEK_RUNTIME_TOKEN`
 
 ## End-to-End Validation
 

@@ -136,6 +136,19 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 `rsproxy`, Tencent COS, and Aliyun OSS mirrors work the same way; pick whichever
 is fastest from your network.
 
+### Tencent Cloud remote-first setup
+
+For an always-on workspace that can be controlled from a phone, use the
+Tencent-native path instead of treating install as a single laptop step:
+
+- CNB mirror/source: `https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git`
+- Tencent Lighthouse HK: `/opt/whalebro` remote workspace
+- Feishu/Lark: long-connection phone bridge
+- EdgeOne: optional public HTTPS edge for docs/status/webhook surfaces
+
+Start with [Tencent Cloud Remote-First Quickstart](TENCENT_CLOUD_REMOTE_FIRST.md),
+then follow [Tencent Lighthouse Hong Kong Phone Setup](TENCENT_LIGHTHOUSE_HK.md).
+
 ---
 
 ## 4. Install via Nix

@@ -5,6 +5,9 @@ for `deepseek serve --http`.
 
 ## Release Shape
 
+- The public teaching path is Tencent-native: CNB source/build/deploy,
+  Lighthouse runtime, Feishu/Lark phone control, and optional EdgeOne for a
+  deliberate public HTTPS edge.
 - `deepseek serve --http` runs as a localhost systemd service on the VPS.
 - `integrations/feishu-bridge` receives Feishu/Lark messages over long
   connection mode and calls the runtime API with a bearer token.
@@ -20,6 +23,8 @@ for `deepseek serve --http`.
 - VPS scripts: `scripts/tencent-lighthouse/`
 - Config validator: `integrations/feishu-bridge/scripts/validate-config.mjs`
 - VPS doctor: `scripts/tencent-lighthouse/doctor.sh`
+- Remote-first tutorial: `docs/TENCENT_CLOUD_REMOTE_FIRST.md`
+- CNB deploy templates: `deploy/tencent-lighthouse/cnb/`
 - Runbook: `docs/TENCENT_LIGHTHOUSE_HK.md`
 - Computer Use handoff: `docs/TENCENT_LIGHTHOUSE_HANDOFF_PROMPT.md`
 
@@ -46,11 +51,18 @@ for `deepseek serve --http`.
    id, and compact runtime errors.
 8. Add a release-note entry describing the Lighthouse + Feishu/Lark remote
    control path and the supported first setup flow.
+9. Add the CNB + Lighthouse + EdgeOne teaching shape without activating a live
+   CNB deployment pipeline before secrets, deploy key, and quota policy are
+   explicit.
 
 ## Acceptance
 
 - A clean Tencent Lighthouse Ubuntu instance can be bootstrapped from the
   documented branch.
+- The Tencent-native onboarding doc explains when to use CNB, when to use
+  Lighthouse, and when EdgeOne is optional rather than required.
+- CNB deploy examples are present but non-active until copied into `.cnb.yml`
+  and `.cnb/tag_deploy.yml`.
 - `deepseek-runtime.service` starts and `/health` responds locally.
 - `deepseek-feishu-bridge.service` connects through long connection mode.
 - A Feishu/Lark phone DM can create a thread, run a prompt, interrupt a turn,

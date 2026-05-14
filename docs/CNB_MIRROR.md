@@ -138,3 +138,22 @@ have two options:
 
 A first-party binary CDN mirror for CNB users is on the v0.8.32+
 roadmap; it is not part of v0.8.31.
+
+## Tencent Cloud remote-first path
+
+The Lighthouse + Feishu/Lark tutorial uses CNB as the Tencent-side source and
+automation lane. For a stable install, clone `main` or a release tag from:
+
+```bash
+https://cnb.cool/deepseek-tui.com/DeepSeek-TUI.git
+```
+
+The mirror currently receives `main` and release tags. Feature branches are not
+part of the normal mirror contract, so a Lighthouse bootstrap for an active
+branch should either clone from GitHub, manually mirror that branch to CNB, or
+wait until the branch is merged/tagged.
+
+CNB deploy-button examples live in `deploy/tencent-lighthouse/cnb/`. They are
+not active until copied into `.cnb.yml` and `.cnb/tag_deploy.yml`, because live
+deploy jobs require a Lighthouse deploy key, target host, and explicit CNB
+quota/billing policy.

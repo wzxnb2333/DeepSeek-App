@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Lighthouse runbook, systemd deploy assets, a long-connection Feishu/Lark
   bridge, a bridge config validator, and a VPS doctor for runtime, Node,
   binaries, env, systemd, and localhost health checks.
+- **Tencent Cloud remote-first onboarding.** Documented the CNB + Lighthouse +
+  Feishu/Lark + optional EdgeOne teaching path and added non-active CNB deploy
+  templates for a future Lighthouse deploy button.
 
 ## [0.8.35] - 2026-05-13
 
