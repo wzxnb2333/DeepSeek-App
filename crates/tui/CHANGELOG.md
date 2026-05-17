@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unused optional `file_path` / `content` / `url` fields as empty strings no
   longer trip the "provide exactly one" guard; blank/whitespace-only source
   fields are treated as absent (#1712).
+- **`theme = "system"` follows macOS appearance.** When `COLORFGBG` is unset
+  or ambiguous (e.g. Ghostty), system-theme detection now falls back to the
+  macOS `AppleInterfaceStyle` appearance so Light mode is no longer rendered
+  in dark colors (#1670).
 
 ### Documentation
 

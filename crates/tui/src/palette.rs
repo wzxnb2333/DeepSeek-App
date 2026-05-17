@@ -264,14 +264,53 @@ impl PaletteMode {
         Some(if bg >= 8 { Self::Light } else { Self::Dark })
     }
 
-    /// Detect whether the terminal profile is light. Missing or unparsable
-    /// values default to dark so existing terminal setups keep the tuned theme.
+    /// Map the output of `defaults read -g AppleInterfaceStyle` to a mode.
+    /// macOS only sets the key in Dark mode (`Some("Dark")`); in Light mode
+    /// the key is absent and the `defaults` invocation fails, which we model
+    /// as `None` and treat as Light (#1670).
+    #[must_use]
+    pub fn from_apple_interface_style(value: Option<&str>) -> Self {
+        match value {
+            Some(v) if v.trim().eq_ignore_ascii_case("dark") => Self::Dark,
+            Some(_) | None => Self::Light,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn detect_macos_appearance() -> Option<Self> {
+        let output = std::process::Command::new("defaults")
+            .args(["read", "-g", "AppleInterfaceStyle"])
+            .output()
+            .ok()?;
+        let style = output
+            .status
+            .success()
+            .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
+        Some(Self::from_apple_interface_style(style.as_deref()))
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn detect_macos_appearance() -> Option<Self> {
+        None
+    }
+
+    /// Detect whether the terminal profile is light. `COLORFGBG` wins when
+    /// present and parsable (it reflects the explicit terminal palette). When
+    /// it is missing or ambiguous, fall back to the macOS system appearance
+    /// (#1670). Anything still unresolved defaults to dark so existing
+    /// terminal setups keep the tuned theme.
     #[must_use]
     pub fn detect() -> Self {
-        std::env::var("COLORFGBG")
+        if let Some(mode) = std::env::var("COLORFGBG")
             .ok()
             .and_then(|value| Self::from_colorfgbg(&value))
-            .unwrap_or(Self::Dark)
+        {
+            return mode;
+        }
+        if let Some(mode) = Self::detect_macos_appearance() {
+            return mode;
+        }
+        Self::Dark
     }
 }
 
@@ -540,7 +579,7 @@ impl ThemeId {
     #[must_use]
     pub const fn tagline(self) -> &'static str {
         match self {
-            Self::System => "Follow terminal background (COLORFGBG)",
+            Self::System => "Follow terminal background, then OS appearance",
             Self::Whale => "Default DeepSeek dark blue",
             Self::WhaleLight => "DeepSeek light, paper-ish",
             Self::Grayscale => "Color-minimal high contrast",
@@ -1331,6 +1370,28 @@ mod tests {
             Some(PaletteMode::Light)
         );
         assert_eq!(PaletteMode::from_colorfgbg("not-a-color"), None);
+    }
+
+    #[test]
+    fn apple_interface_style_absent_key_is_light() {
+        // macOS Light mode: `defaults read -g AppleInterfaceStyle` fails and
+        // we model that as `None` (#1670).
+        assert_eq!(
+            PaletteMode::from_apple_interface_style(None),
+            PaletteMode::Light
+        );
+        assert_eq!(
+            PaletteMode::from_apple_interface_style(Some("Dark\n")),
+            PaletteMode::Dark
+        );
+        assert_eq!(
+            PaletteMode::from_apple_interface_style(Some("  dark ")),
+            PaletteMode::Dark
+        );
+        assert_eq!(
+            PaletteMode::from_apple_interface_style(Some("")),
+            PaletteMode::Light
+        );
     }
 
     #[test]
