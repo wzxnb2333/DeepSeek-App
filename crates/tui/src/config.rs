@@ -2020,7 +2020,7 @@ fn expand_pathbuf(path: PathBuf) -> PathBuf {
     path
 }
 
-fn resolve_load_config_path(path: Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn resolve_load_config_path(path: Option<PathBuf>) -> Option<PathBuf> {
     if let Some(path) = path {
         return Some(expand_pathbuf(path));
     }
@@ -3003,7 +3003,7 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 
 /// Write content to a config file with restrictive permissions (owner-only read/write).
 /// On Unix this sets mode 0o600 before writing.
-fn write_config_file_secure(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_config_file_secure(path: &Path, content: &str) -> Result<()> {
     #[cfg(unix)]
     {
         let mut file = fs::OpenOptions::new()

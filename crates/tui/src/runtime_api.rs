@@ -3,26 +3,27 @@
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fs;
+use std::io::Read;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use async_stream::stream;
 use axum::extract::{Path, Query, Request, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -30,7 +31,8 @@ use crate::automation_manager::{
     AutomationManager, AutomationRecord, AutomationRunRecord, AutomationSchedulerConfig,
     CreateAutomationRequest, SharedAutomationManager, UpdateAutomationRequest, spawn_scheduler,
 };
-use crate::config::{Config, DEFAULT_TEXT_MODEL};
+use crate::client::DeepSeekClient;
+use crate::config::{ApiProvider, Config, DEFAULT_TEXT_MODEL};
 use crate::mcp::{McpConfig, McpPool};
 use crate::runtime_threads::{
     CompactThreadRequest, CreateThreadRequest, ExternalApprovalDecision, RuntimeThreadManager,
@@ -47,7 +49,8 @@ use crate::task_manager::{
 
 #[derive(Clone)]
 pub struct RuntimeApiState {
-    config: Config,
+    config: Arc<RwLock<Config>>,
+    config_path: Option<PathBuf>,
     workspace: PathBuf,
     task_manager: SharedTaskManager,
     runtime_threads: SharedRuntimeThreadManager,
@@ -78,6 +81,10 @@ pub struct RuntimeApiOptions {
     pub auth_token: Option<String>,
     /// Allow `/v1/*` routes without auth when no token is configured.
     pub insecure_no_auth: bool,
+    /// Emit a single machine-readable startup JSON line for desktop supervisors.
+    pub startup_json: bool,
+    /// Config path to patch through the runtime API. Mirrors the CLI --config flag.
+    pub config_path: Option<PathBuf>,
 }
 
 impl Default for RuntimeApiOptions {
@@ -89,6 +96,8 @@ impl Default for RuntimeApiOptions {
             cors_origins: Vec::new(),
             auth_token: None,
             insecure_no_auth: false,
+            startup_json: false,
+            config_path: None,
         }
     }
 }
@@ -211,6 +220,7 @@ struct ThreadsQuery {
 struct ThreadSummaryQuery {
     limit: Option<usize>,
     search: Option<String>,
+    workspace: Option<PathBuf>,
     include_archived: Option<bool>,
     /// When `true`, returns archived threads only (overrides `include_archived`).
     /// Whalescale#260 / #563.
@@ -230,12 +240,26 @@ fn resolve_thread_filter(
     }
 }
 
+fn workspace_matches_filter(candidate: &StdPath, filter: &StdPath) -> bool {
+    let normalize = |path: &StdPath| {
+        let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let value = resolved.to_string_lossy().replace('\\', "/");
+        if cfg!(windows) {
+            value.to_ascii_lowercase()
+        } else {
+            value
+        }
+    };
+    normalize(candidate) == normalize(filter)
+}
+
 #[derive(Debug, Serialize)]
 struct ThreadSummary {
     id: String,
     title: String,
     preview: String,
     model: String,
+    workspace: PathBuf,
     mode: String,
     archived: bool,
     updated_at: chrono::DateTime<Utc>,
@@ -305,6 +329,102 @@ struct RuntimeInfoResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct EffectiveConfigResponse {
+    config_path: Option<PathBuf>,
+    config_present: bool,
+    workspace: PathBuf,
+    provider: String,
+    default_model: String,
+    base_url: String,
+    api_key_source: String,
+    approval_policy: String,
+    sandbox_mode: String,
+    allow_shell: bool,
+    yolo: bool,
+    reasoning_effort: String,
+    mcp_config_path: PathBuf,
+    skills_dir: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct PatchEffectiveConfigRequest {
+    provider: Option<String>,
+    default_text_model: Option<String>,
+    reasoning_effort: Option<String>,
+    approval_policy: Option<String>,
+    sandbox_mode: Option<String>,
+    allow_shell: Option<bool>,
+    yolo: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelsResponse {
+    provider: String,
+    default_model: String,
+    live: bool,
+    error: Option<String>,
+    models: Vec<crate::client::AvailableModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceTreeQuery {
+    path: Option<String>,
+    depth: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceTreeResponse {
+    root: PathBuf,
+    path: String,
+    entries: Vec<WorkspaceEntry>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceEntry {
+    path: String,
+    name: String,
+    is_dir: bool,
+    size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceFileQuery {
+    path: String,
+    max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceFileResponse {
+    path: String,
+    content: String,
+    truncated: bool,
+    bytes_read: usize,
+    size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceSearchQuery {
+    q: String,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchResponse {
+    query: String,
+    matches: Vec<WorkspaceSearchMatch>,
+    truncated: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct WorkspaceSearchMatch {
+    path: String,
+    line: usize,
+    snippet: String,
+}
+
+#[derive(Debug, Serialize)]
 struct McpServerEntry {
     name: String,
     enabled: bool,
@@ -362,10 +482,6 @@ pub async fn run_http_server(
     workspace: PathBuf,
     options: RuntimeApiOptions,
 ) -> Result<()> {
-    if options.port == 0 {
-        bail!("Port must be > 0");
-    }
-
     let task_cfg = TaskManagerConfig::from_runtime(
         &config,
         workspace.clone(),
@@ -409,8 +525,19 @@ pub async fn run_http_server(
         );
         SkillStateStore::default()
     });
+    let addr: SocketAddr = format!("{}:{}", options.host, options.port)
+        .parse()
+        .with_context(|| format!("Invalid bind address '{}:{}'", options.host, options.port))?;
+    let listener = TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("Failed to bind {addr}"))?;
+    let actual_addr = listener
+        .local_addr()
+        .context("Failed to read runtime API bind address")?;
+
     let state = RuntimeApiState {
-        config: config.clone(),
+        config: Arc::new(RwLock::new(config.clone())),
+        config_path: options.config_path.clone(),
         workspace,
         task_manager,
         runtime_threads,
@@ -422,48 +549,60 @@ pub async fn run_http_server(
         skill_state: Arc::new(Mutex::new(skill_state)),
         auth_required: auth_enabled,
         bind_host: options.host.clone(),
-        bind_port: options.port,
+        bind_port: actual_addr.port(),
     };
     let app = build_router(state);
 
-    let addr: SocketAddr = format!("{}:{}", options.host, options.port)
-        .parse()
-        .with_context(|| format!("Invalid bind address '{}:{}'", options.host, options.port))?;
-    let listener = TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("Failed to bind {addr}"))?;
-
-    println!("Runtime API listening on http://{addr}");
-    if resolved_auth.generated {
-        if let Some(token) = runtime_token.as_deref() {
-            println!("Runtime API auth: generated bearer token for this process.");
-            println!("  Authorization: Bearer {token}");
-            println!("  Set DEEPSEEK_RUNTIME_TOKEN or pass --auth-token for a stable token.");
-        }
-    } else if auth_enabled {
-        println!("Runtime API auth: bearer token required for /v1/* routes.");
-    } else {
-        println!("Runtime API auth: disabled by explicit insecure mode.");
-    }
-    let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
-    if is_loopback {
-        println!("Security: this server is local-first. Do not expose it to untrusted networks.");
-    } else {
+    if options.startup_json {
         println!(
-            "Security: bound to {host}; reachable from any peer that can route to this address.",
-            host = options.host
+            "{}",
+            serde_json::to_string(&json!({
+                "status": "ready",
+                "service": "deepseek-runtime-api",
+                "base_url": format!("http://{actual_addr}"),
+                "bind_host": actual_addr.ip().to_string(),
+                "port": actual_addr.port(),
+                "auth_required": auth_enabled,
+                "auth_token": runtime_token,
+                "token_generated": resolved_auth.generated,
+                "version": env!("CARGO_PKG_VERSION"),
+            }))?
         );
-        if !auth_enabled {
+    } else {
+        println!("Runtime API listening on http://{actual_addr}");
+        if resolved_auth.generated {
+            if let Some(token) = runtime_token.as_deref() {
+                println!("Runtime API auth: generated bearer token for this process.");
+                println!("  Authorization: Bearer {token}");
+                println!("  Set DEEPSEEK_RUNTIME_TOKEN or pass --auth-token for a stable token.");
+            }
+        } else if auth_enabled {
+            println!("Runtime API auth: bearer token required for /v1/* routes.");
+        } else {
+            println!("Runtime API auth: disabled by explicit insecure mode.");
+        }
+        let is_loopback = options.host == "127.0.0.1" || options.host == "::1";
+        if is_loopback {
             println!(
-                "  WARNING: auth is disabled. Anyone on the network can call /v1/* without authentication."
+                "Security: this server is local-first. Do not expose it to untrusted networks."
+            );
+        } else {
+            println!(
+                "Security: bound to {host}; reachable from any peer that can route to this address.",
+                host = options.host
+            );
+            if !auth_enabled {
+                println!(
+                    "  WARNING: auth is disabled. Anyone on the network can call /v1/* without authentication."
+                );
+            }
+            println!(
+                "  /v1/runtime/info reports bind_host={host:?}, port={port}, auth_required={auth}.",
+                host = options.host,
+                port = actual_addr.port(),
+                auth = auth_enabled,
             );
         }
-        println!(
-            "  /v1/runtime/info reports bind_host={host:?}, port={port}, auth_required={auth}.",
-            host = options.host,
-            port = options.port,
-            auth = auth_enabled,
-        );
     }
     let serve_result = axum::serve(listener, app)
         .await
@@ -481,11 +620,23 @@ pub fn build_router(state: RuntimeApiState) -> Router {
             "/v1/sessions/{id}/resume-thread",
             post(resume_session_thread),
         )
+        .route(
+            "/v1/config/effective",
+            get(get_effective_config).patch(patch_effective_config),
+        )
+        .route("/v1/config", patch(patch_effective_config))
+        .route("/v1/models", get(list_models))
         .route("/v1/workspace/status", get(workspace_status))
+        .route("/v1/workspace/tree", get(workspace_tree))
+        .route("/v1/workspace/file", get(workspace_file))
+        .route("/v1/workspace/search", get(workspace_search))
         .route("/v1/stream", post(stream_turn))
         .route("/v1/threads", get(list_threads).post(create_thread))
         .route("/v1/threads/summary", get(list_threads_summary))
-        .route("/v1/threads/{id}", get(get_thread).patch(update_thread))
+        .route(
+            "/v1/threads/{id}",
+            get(get_thread).patch(update_thread).delete(delete_thread),
+        )
         .route("/v1/threads/{id}/resume", post(resume_thread))
         .route("/v1/threads/{id}/fork", post(fork_thread))
         .route("/v1/threads/{id}/turns", post(start_thread_turn))
@@ -501,7 +652,7 @@ pub fn build_router(state: RuntimeApiState) -> Router {
         .route("/v1/threads/{id}/events", get(stream_thread_events))
         .route("/v1/approvals/{approval_id}", post(decide_approval))
         .route("/v1/tasks", get(list_tasks).post(create_task))
-        .route("/v1/tasks/{id}", get(get_task))
+        .route("/v1/tasks/{id}", get(get_task).delete(delete_task))
         .route("/v1/tasks/{id}/cancel", post(cancel_task))
         .route("/v1/skills", get(list_skills))
         .route("/v1/skills/{name}", post(set_skill_enabled))
@@ -587,6 +738,159 @@ async fn health() -> Json<HealthResponse> {
         service: "deepseek-runtime-api",
         mode: "local",
     })
+}
+
+async fn get_effective_config(
+    State(state): State<RuntimeApiState>,
+) -> Result<Json<EffectiveConfigResponse>, ApiError> {
+    let config = state.config.read().await.clone();
+    Ok(Json(effective_config_response(
+        &config,
+        &state.workspace,
+        state.config_path.clone(),
+    )))
+}
+
+async fn patch_effective_config(
+    State(state): State<RuntimeApiState>,
+    Json(req): Json<PatchEffectiveConfigRequest>,
+) -> Result<Json<EffectiveConfigResponse>, ApiError> {
+    let config_path = crate::config::resolve_load_config_path(state.config_path.clone())
+        .ok_or_else(|| ApiError::internal("could not resolve config path"))?;
+    crate::config::ensure_parent_dir(&config_path)
+        .map_err(|err| ApiError::internal(format!("create config directory: {err}")))?;
+
+    let mut doc = read_config_doc(&config_path)?;
+    apply_config_patch(&mut doc, &req)?;
+    let rendered = toml::to_string_pretty(&doc)
+        .map_err(|err| ApiError::internal(format!("serialize config: {err}")))?;
+    crate::config::write_config_file_secure(&config_path, &rendered)
+        .map_err(|err| ApiError::internal(format!("write config: {err}")))?;
+
+    let updated = Config::load(Some(config_path.clone()), None)
+        .map_err(|err| ApiError::bad_request(format!("reload patched config: {err}")))?;
+    *state.config.write().await = updated.clone();
+
+    Ok(Json(effective_config_response(
+        &updated,
+        &state.workspace,
+        Some(config_path),
+    )))
+}
+
+async fn list_models(State(state): State<RuntimeApiState>) -> Json<ModelsResponse> {
+    let config = state.config.read().await.clone();
+    let default_model = config.default_model();
+    let provider = config.api_provider().as_str().to_string();
+    match DeepSeekClient::new(&config) {
+        Ok(client) => match client.list_models().await {
+            Ok(mut models) => {
+                models.sort_by(|a, b| a.id.cmp(&b.id));
+                Json(ModelsResponse {
+                    provider,
+                    default_model,
+                    live: true,
+                    error: None,
+                    models,
+                })
+            }
+            Err(err) => Json(ModelsResponse {
+                provider,
+                default_model,
+                live: false,
+                error: Some(err.to_string()),
+                models: fallback_models(),
+            }),
+        },
+        Err(err) => Json(ModelsResponse {
+            provider,
+            default_model,
+            live: false,
+            error: Some(err.to_string()),
+            models: fallback_models(),
+        }),
+    }
+}
+
+async fn workspace_tree(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<WorkspaceTreeQuery>,
+) -> Result<Json<WorkspaceTreeResponse>, ApiError> {
+    let depth = query.depth.unwrap_or(4).clamp(0, 8);
+    let limit = query.limit.unwrap_or(500_000).clamp(1, 500_000);
+    let rel = sanitize_rel_path(query.path.as_deref())?;
+    let base = resolve_workspace_path(&state.workspace, &rel)?;
+    if !base.is_dir() {
+        return Err(ApiError::bad_request(format!(
+            "workspace path '{}' is not a directory",
+            rel.display()
+        )));
+    }
+
+    let root = fs::canonicalize(&state.workspace)
+        .map_err(|err| ApiError::internal(format!("canonicalize workspace: {err}")))?;
+    let mut entries = Vec::new();
+    collect_tree_entries(&root, &base, depth, limit, &mut entries)?;
+    let truncated = entries.len() >= limit;
+    Ok(Json(WorkspaceTreeResponse {
+        root: state.workspace.clone(),
+        path: rel_path_string(&rel),
+        entries,
+        truncated,
+    }))
+}
+
+async fn workspace_file(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<WorkspaceFileQuery>,
+) -> Result<Json<WorkspaceFileResponse>, ApiError> {
+    let rel = sanitize_rel_path(Some(&query.path))?;
+    let path = resolve_workspace_path(&state.workspace, &rel)?;
+    if !path.is_file() {
+        return Err(ApiError::bad_request(format!(
+            "workspace path '{}' is not a file",
+            rel.display()
+        )));
+    }
+
+    let max_bytes = query.max_bytes.unwrap_or(256 * 1024).clamp(1, 1024 * 1024);
+    let metadata = fs::metadata(&path)
+        .map_err(|err| ApiError::internal(format!("read file metadata: {err}")))?;
+    let mut file =
+        fs::File::open(&path).map_err(|err| ApiError::internal(format!("open file: {err}")))?;
+    let mut buffer = vec![0_u8; max_bytes.saturating_add(1)];
+    let bytes_read = file
+        .read(&mut buffer)
+        .map_err(|err| ApiError::internal(format!("read file: {err}")))?;
+    buffer.truncate(bytes_read.min(max_bytes));
+    let content = String::from_utf8(buffer)
+        .map_err(|_| ApiError::bad_request("file is not valid UTF-8 text"))?;
+    Ok(Json(WorkspaceFileResponse {
+        path: rel_path_string(&rel),
+        content,
+        truncated: metadata.len() as usize > max_bytes,
+        bytes_read: bytes_read.min(max_bytes),
+        size: metadata.len(),
+    }))
+}
+
+async fn workspace_search(
+    State(state): State<RuntimeApiState>,
+    Query(query): Query<WorkspaceSearchQuery>,
+) -> Result<Json<WorkspaceSearchResponse>, ApiError> {
+    let needle = query.q.trim().to_string();
+    if needle.is_empty() {
+        return Err(ApiError::bad_request("search query cannot be empty"));
+    }
+    let limit = query.limit.unwrap_or(100).clamp(1, 500);
+    let mut matches = Vec::new();
+    collect_search_matches(&state.workspace, &needle, limit, &mut matches)?;
+    let truncated = matches.len() >= limit;
+    Ok(Json(WorkspaceSearchResponse {
+        query: needle,
+        matches,
+        truncated,
+    }))
 }
 
 async fn list_sessions(
@@ -747,9 +1051,9 @@ async fn create_task(
         req.workspace = Some(state.workspace.clone());
     }
     if req.model.is_none() {
+        let config = state.config.read().await;
         req.model = Some(
-            state
-                .config
+            config
                 .default_text_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
@@ -768,9 +1072,9 @@ async fn create_thread(
     Json(mut req): Json<CreateThreadRequest>,
 ) -> Result<(StatusCode, Json<ThreadRecord>), ApiError> {
     if req.model.as_ref().is_none_or(|m| m.trim().is_empty()) {
+        let config = state.config.read().await;
         req.model = Some(
-            state
-                .config
+            config
                 .default_text_model
                 .clone()
                 .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string()),
@@ -810,15 +1114,26 @@ async fn list_threads_summary(
 ) -> Result<Json<Vec<ThreadSummary>>, ApiError> {
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let search = query.search.as_deref().map(str::to_ascii_lowercase);
+    let workspace_filter = query.workspace.as_deref();
     let filter = resolve_thread_filter(query.include_archived, query.archived_only);
+    let source_limit = if workspace_filter.is_some() {
+        None
+    } else {
+        Some(limit)
+    };
     let threads = state
         .runtime_threads
-        .list_threads(filter, Some(limit))
+        .list_threads(filter, source_limit)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut summaries = Vec::new();
     for thread in threads {
+        if let Some(workspace_filter) = workspace_filter
+            && !workspace_matches_filter(&thread.workspace, workspace_filter)
+        {
+            continue;
+        }
         let detail = state
             .runtime_threads
             .get_thread_detail(&thread.id)
@@ -881,6 +1196,7 @@ async fn list_threads_summary(
             title,
             preview,
             model: thread.model,
+            workspace: thread.workspace,
             mode: thread.mode,
             archived: thread.archived,
             updated_at: thread.updated_at,
@@ -905,7 +1221,8 @@ async fn workspace_status(
 async fn list_skills(
     State(state): State<RuntimeApiState>,
 ) -> Result<Json<SkillsResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
+    let config = state.config.read().await;
+    let skills_dir = resolve_skills_dir(&config, &state.workspace);
     let registry = SkillRegistry::discover(&skills_dir);
     let skill_state = state.skill_state.lock().await;
     let skills = registry
@@ -930,7 +1247,8 @@ async fn set_skill_enabled(
     Path(name): Path<String>,
     Json(req): Json<SetSkillEnabledRequest>,
 ) -> Result<Json<SetSkillEnabledResponse>, ApiError> {
-    let skills_dir = resolve_skills_dir(&state.config, &state.workspace);
+    let config = state.config.read().await;
+    let skills_dir = resolve_skills_dir(&config, &state.workspace);
     let registry = SkillRegistry::discover(&skills_dir);
     let exists = registry.list().iter().any(|skill| skill.name == name);
     if !exists {
@@ -1178,6 +1496,18 @@ async fn update_thread(
     Ok(Json(thread))
 }
 
+async fn delete_thread(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<ThreadRecord>, ApiError> {
+    let thread = state
+        .runtime_threads
+        .delete_thread(&id)
+        .await
+        .map_err(map_thread_err)?;
+    Ok(Json(thread))
+}
+
 async fn resume_thread(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -1302,6 +1632,18 @@ async fn cancel_task(
     Ok(Json(task))
 }
 
+async fn delete_task(
+    State(state): State<RuntimeApiState>,
+    Path(id): Path<String>,
+) -> Result<Json<TaskRecord>, ApiError> {
+    let task = state
+        .task_manager
+        .delete_task(&id)
+        .await
+        .map_err(map_task_err)?;
+    Ok(Json(task))
+}
+
 async fn stream_thread_events(
     State(state): State<RuntimeApiState>,
     Path(id): Path<String>,
@@ -1361,9 +1703,9 @@ async fn stream_turn(
         return Err(ApiError::bad_request("prompt is required"));
     }
 
+    let config = state.config.read().await;
     let model = req.model.clone().unwrap_or_else(|| {
-        state
-            .config
+        config
             .default_text_model
             .clone()
             .unwrap_or_else(|| DEFAULT_TEXT_MODEL.to_string())
@@ -1373,7 +1715,8 @@ async fn stream_turn(
         .clone()
         .unwrap_or_else(|| state.workspace.clone());
     let mode = req.mode.clone().unwrap_or_else(|| "agent".to_string());
-    let allow_shell = req.allow_shell.unwrap_or(state.config.allow_shell());
+    let allow_shell = req.allow_shell.unwrap_or(config.allow_shell());
+    drop(config);
     let trust_mode = req.trust_mode.unwrap_or(false);
     let auto_approve = req.auto_approve.unwrap_or(false);
     let prompt = req.prompt;
@@ -1406,6 +1749,7 @@ async fn stream_turn(
                 allow_shell: Some(allow_shell),
                 trust_mode: Some(trust_mode),
                 auto_approve: Some(auto_approve),
+                reasoning_effort: None,
             },
         )
         .await
@@ -1587,6 +1931,268 @@ fn truncate_text(text: &str, max_chars: usize) -> String {
     }
     let truncated: String = text.chars().take(max_chars.saturating_sub(3)).collect();
     format!("{truncated}...")
+}
+
+fn effective_config_response(
+    config: &Config,
+    workspace: &StdPath,
+    config_path: Option<PathBuf>,
+) -> EffectiveConfigResponse {
+    let config_present = config_path.as_ref().is_some_and(|path| path.exists());
+    EffectiveConfigResponse {
+        config_path,
+        config_present,
+        workspace: workspace.to_path_buf(),
+        provider: config.api_provider().as_str().to_string(),
+        default_model: config.default_model(),
+        base_url: config.deepseek_base_url(),
+        api_key_source: runtime_api_key_source(config).to_string(),
+        approval_policy: config
+            .approval_policy
+            .clone()
+            .unwrap_or_else(|| "on-request".to_string()),
+        sandbox_mode: config
+            .sandbox_mode
+            .clone()
+            .unwrap_or_else(|| "workspace-write".to_string()),
+        allow_shell: config.allow_shell(),
+        yolo: config.yolo.unwrap_or(false),
+        reasoning_effort: config
+            .reasoning_effort
+            .clone()
+            .unwrap_or_else(|| "max".to_string()),
+        mcp_config_path: config.mcp_config_path(),
+        skills_dir: config.skills_dir(),
+    }
+}
+
+fn runtime_api_key_source(config: &Config) -> &'static str {
+    if std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .is_some_and(|key| !key.trim().is_empty())
+    {
+        return match std::env::var("DEEPSEEK_API_KEY_SOURCE").ok().as_deref() {
+            Some("config") => "config",
+            Some("keyring") => "keyring",
+            _ => "env",
+        };
+    }
+    if config
+        .api_key
+        .as_ref()
+        .is_some_and(|key| !key.trim().is_empty())
+        || config
+            .provider_config()
+            .and_then(|entry| entry.api_key.as_ref())
+            .is_some_and(|key| !key.trim().is_empty())
+    {
+        "config"
+    } else {
+        "missing"
+    }
+}
+
+fn read_config_doc(path: &StdPath) -> Result<toml::Value, ApiError> {
+    if !path.exists() {
+        return Ok(toml::Value::Table(toml::map::Map::new()));
+    }
+    let raw = fs::read_to_string(path)
+        .map_err(|err| ApiError::internal(format!("read config: {err}")))?;
+    toml::from_str(&raw).map_err(|err| ApiError::bad_request(format!("parse config: {err}")))
+}
+
+fn apply_config_patch(
+    doc: &mut toml::Value,
+    req: &PatchEffectiveConfigRequest,
+) -> Result<(), ApiError> {
+    let Some(table) = doc.as_table_mut() else {
+        return Err(ApiError::bad_request("config root must be a TOML table"));
+    };
+
+    if let Some(provider) = req.provider.as_deref() {
+        let parsed = ApiProvider::parse(provider)
+            .ok_or_else(|| ApiError::bad_request(format!("invalid provider '{provider}'")))?;
+        table.insert(
+            "provider".to_string(),
+            toml::Value::String(parsed.as_str().to_string()),
+        );
+    }
+    set_nonempty_string(
+        table,
+        "default_text_model",
+        req.default_text_model.as_deref(),
+    )?;
+    set_nonempty_string(table, "reasoning_effort", req.reasoning_effort.as_deref())?;
+    set_nonempty_string(table, "approval_policy", req.approval_policy.as_deref())?;
+    set_nonempty_string(table, "sandbox_mode", req.sandbox_mode.as_deref())?;
+    if let Some(allow_shell) = req.allow_shell {
+        table.insert("allow_shell".to_string(), toml::Value::Boolean(allow_shell));
+    }
+    if let Some(yolo) = req.yolo {
+        table.insert("yolo".to_string(), toml::Value::Boolean(yolo));
+    }
+    Ok(())
+}
+
+fn set_nonempty_string(
+    table: &mut toml::map::Map<String, toml::Value>,
+    key: &str,
+    value: Option<&str>,
+) -> Result<(), ApiError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request(format!("{key} cannot be empty")));
+    }
+    table.insert(key.to_string(), toml::Value::String(trimmed.to_string()));
+    Ok(())
+}
+
+fn fallback_models() -> Vec<crate::client::AvailableModel> {
+    ["deepseek-v4-pro", "deepseek-v4-flash"]
+        .into_iter()
+        .map(|id| crate::client::AvailableModel {
+            id: id.to_string(),
+            owned_by: Some("deepseek".to_string()),
+            created: None,
+        })
+        .collect()
+}
+
+fn sanitize_rel_path(input: Option<&str>) -> Result<PathBuf, ApiError> {
+    let raw = input.unwrap_or("").trim();
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        return Err(ApiError::bad_request("workspace path must be relative"));
+    }
+    if path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ApiError::bad_request("workspace path cannot contain '..'"));
+    }
+    Ok(path)
+}
+
+fn resolve_workspace_path(workspace: &StdPath, rel: &StdPath) -> Result<PathBuf, ApiError> {
+    let root = fs::canonicalize(workspace)
+        .map_err(|err| ApiError::internal(format!("canonicalize workspace: {err}")))?;
+    let target = root.join(rel);
+    let canonical = fs::canonicalize(&target)
+        .map_err(|err| ApiError::not_found(format!("workspace path not found: {err}")))?;
+    if !canonical.starts_with(&root) {
+        return Err(ApiError::bad_request(
+            "workspace path escapes workspace root",
+        ));
+    }
+    Ok(canonical)
+}
+
+fn rel_path_string(path: &StdPath) -> String {
+    let rendered = path.to_string_lossy().replace('\\', "/");
+    if rendered == "." {
+        String::new()
+    } else {
+        rendered
+    }
+}
+
+fn workspace_relative_path(workspace: &StdPath, path: &StdPath) -> String {
+    path.strip_prefix(workspace)
+        .ok()
+        .map(rel_path_string)
+        .unwrap_or_else(|| path.to_string_lossy().replace('\\', "/"))
+}
+
+fn collect_tree_entries(
+    workspace: &StdPath,
+    dir: &StdPath,
+    depth: usize,
+    limit: usize,
+    entries: &mut Vec<WorkspaceEntry>,
+) -> Result<(), ApiError> {
+    if entries.len() >= limit {
+        return Ok(());
+    }
+    let mut children = fs::read_dir(dir)
+        .map_err(|err| ApiError::internal(format!("read directory: {err}")))?
+        .filter_map(std::result::Result::ok)
+        .collect::<Vec<_>>();
+    children.sort_by_key(|entry| entry.file_name());
+
+    for child in children {
+        if entries.len() >= limit {
+            break;
+        }
+        let path = child.path();
+        let metadata = match child.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        let is_dir = metadata.is_dir();
+        entries.push(WorkspaceEntry {
+            path: workspace_relative_path(workspace, &path),
+            name: child.file_name().to_string_lossy().to_string(),
+            is_dir,
+            size: (!is_dir).then_some(metadata.len()),
+        });
+        if is_dir && depth > 0 {
+            collect_tree_entries(workspace, &path, depth - 1, limit, entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_search_matches(
+    workspace: &StdPath,
+    needle: &str,
+    limit: usize,
+    matches: &mut Vec<WorkspaceSearchMatch>,
+) -> Result<(), ApiError> {
+    let root = fs::canonicalize(workspace)
+        .map_err(|err| ApiError::internal(format!("canonicalize workspace: {err}")))?;
+    let needle_lower = needle.to_ascii_lowercase();
+    let walker = ignore::WalkBuilder::new(&root)
+        .hidden(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .build();
+
+    for entry in walker.filter_map(std::result::Result::ok) {
+        if matches.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.len() > 512 * 1024 {
+            continue;
+        }
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        for (idx, line) in content.lines().enumerate() {
+            if line.to_ascii_lowercase().contains(&needle_lower) {
+                matches.push(WorkspaceSearchMatch {
+                    path: workspace_relative_path(&root, path),
+                    line: idx + 1,
+                    snippet: truncate_text(line.trim(), 240),
+                });
+                if matches.len() >= limit {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn collect_workspace_status(workspace: &std::path::Path) -> WorkspaceStatusResponse {
@@ -1974,12 +2580,33 @@ mod tests {
             tokio::task::JoinHandle<()>,
         )>,
     > {
+        spawn_test_server_with_root_workspace_and_token(
+            root,
+            sessions_dir,
+            PathBuf::from("."),
+            runtime_token,
+        )
+        .await
+    }
+
+    async fn spawn_test_server_with_root_workspace_and_token(
+        root: PathBuf,
+        sessions_dir: PathBuf,
+        workspace: PathBuf,
+        runtime_token: Option<String>,
+    ) -> Result<
+        Option<(
+            SocketAddr,
+            SharedRuntimeThreadManager,
+            tokio::task::JoinHandle<()>,
+        )>,
+    > {
         fs::create_dir_all(&sessions_dir)?;
         let manager = TaskManager::start_with_executor(
             TaskManagerConfig {
                 data_dir: root.join("tasks"),
                 worker_count: 1,
-                default_workspace: PathBuf::from("."),
+                default_workspace: workspace.clone(),
                 default_model: DEFAULT_TEXT_MODEL.to_string(),
                 default_mode: "agent".to_string(),
                 allow_shell: false,
@@ -2009,7 +2636,7 @@ mod tests {
         });
         let runtime_threads: SharedRuntimeThreadManager = Arc::new(RuntimeThreadManager::open(
             config,
-            PathBuf::from("."),
+            workspace.clone(),
             RuntimeThreadManagerConfig::from_task_data_dir(root.join("runtime")),
         )?);
         runtime_threads.attach_task_manager(manager.clone());
@@ -2020,8 +2647,9 @@ mod tests {
 
         let auth_required = runtime_token.is_some();
         let state = RuntimeApiState {
-            config: Config::default(),
-            workspace: PathBuf::from("."),
+            config: Arc::new(RwLock::new(Config::default())),
+            config_path: None,
+            workspace,
             task_manager: manager,
             runtime_threads: runtime_threads.clone(),
             cors_origins: Vec::new(),
@@ -2193,6 +2821,38 @@ mod tests {
             .error_for_status()?
             .json()
             .await?;
+
+        for _ in 0..30 {
+            let current: serde_json::Value = client
+                .get(format!("http://{addr}/v1/tasks/{id}"))
+                .send()
+                .await?
+                .error_for_status()?
+                .json()
+                .await?;
+            if current["status"] == "canceled"
+                || current["status"] == "completed"
+                || current["status"] == "failed"
+            {
+                break;
+            }
+            sleep(Duration::from_millis(25)).await;
+        }
+
+        let deleted: serde_json::Value = client
+            .delete(format!("http://{addr}/v1/tasks/{id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(deleted["id"], id);
+
+        let missing = client
+            .get(format!("http://{addr}/v1/tasks/{id}"))
+            .send()
+            .await?;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 
         handle.abort();
         Ok(())
@@ -2602,6 +3262,18 @@ mod tests {
             .json()
             .await?;
         assert_eq!(compact_start["thread"]["id"], thread_id);
+        let compact_turn_id = compact_start["turn"]["id"]
+            .as_str()
+            .context("missing compact turn id")?
+            .to_string();
+        let _ = wait_for_terminal_turn_status(
+            &client,
+            addr,
+            &thread_id,
+            &compact_turn_id,
+            Duration::from_secs(2),
+        )
+        .await?;
 
         let events_resp = client
             .get(format!(
@@ -2622,6 +3294,21 @@ mod tests {
             chunk_text.contains("event:"),
             "expected SSE event chunk, got: {chunk_text}"
         );
+
+        let deleted: serde_json::Value = client
+            .delete(format!("http://{addr}/v1/threads/{thread_id}"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(deleted["id"], thread_id);
+
+        let missing_after_delete = client
+            .get(format!("http://{addr}/v1/threads/{thread_id}"))
+            .send()
+            .await?;
+        assert_eq!(missing_after_delete.status(), StatusCode::NOT_FOUND);
 
         handle.abort();
         Ok(())
@@ -3595,6 +4282,107 @@ mod tests {
         assert_eq!(info["bind_host"], "127.0.0.1");
         assert_eq!(info["auth_required"], false);
         assert!(info["version"].is_string());
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn config_and_model_endpoints_do_not_expose_secret_values() -> Result<()> {
+        let Some((addr, _runtime_threads, handle)) = spawn_test_server().await? else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+
+        let config: serde_json::Value = client
+            .get(format!("http://{addr}/v1/config/effective"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(config.get("api_key_source").is_some());
+        assert!(config.get("api_key").is_none());
+
+        let models: serde_json::Value = client
+            .get(format!("http://{addr}/v1/models"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(models["models"].as_array().is_some());
+        assert!(models.get("api_key").is_none());
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_tree_file_and_search_are_workspace_scoped() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path().join("runtime");
+        let sessions = temp.path().join("sessions");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(workspace.join("src"))?;
+        fs::write(
+            workspace.join("src").join("main.rs"),
+            "fn main() {\n    println!(\"deepseek app\");\n}\n",
+        )?;
+
+        let Some((addr, _runtime_threads, handle)) =
+            spawn_test_server_with_root_workspace_and_token(
+                root,
+                sessions,
+                workspace.clone(),
+                None,
+            )
+            .await?
+        else {
+            return Ok(());
+        };
+        let client = reqwest::Client::new();
+
+        let tree: serde_json::Value = client
+            .get(format!("http://{addr}/v1/workspace/tree?depth=2"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let entries = tree["entries"].as_array().context("tree entries")?;
+        assert!(entries.iter().any(|entry| entry["path"] == "src/main.rs"));
+
+        let file: serde_json::Value = client
+            .get(format!("http://{addr}/v1/workspace/file?path=src/main.rs"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert!(
+            file["content"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("deepseek app")
+        );
+
+        let search: serde_json::Value = client
+            .get(format!("http://{addr}/v1/workspace/search?q=deepseek"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(search["matches"][0]["path"], "src/main.rs");
+
+        let escape = client
+            .get(format!(
+                "http://{addr}/v1/workspace/file?path=../Cargo.toml"
+            ))
+            .send()
+            .await?;
+        assert_eq!(escape.status(), StatusCode::BAD_REQUEST);
 
         handle.abort();
         Ok(())

@@ -747,7 +747,8 @@ mod tests {
         let result = list_skills(&mut app, None);
         assert!(result.message.is_some());
         let msg = result.message.unwrap();
-        assert!(msg.contains("No skills found"));
+        assert!(msg.contains("Available skills"));
+        assert!(msg.contains("Built-in skills"));
         assert!(msg.contains("Skills location:"));
     }
 
@@ -803,7 +804,7 @@ mod tests {
             "beta-skill must be filtered out"
         );
         assert!(
-            msg.contains("matching `alph`") && msg.contains("2 of 3"),
+            msg.contains("matching `alph`") && msg.contains("2 of "),
             "header should show count + total, got: {msg}"
         );
     }

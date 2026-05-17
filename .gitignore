@@ -12,7 +12,19 @@
 .env
 .env.*
 !.env.example
+.deps/
+.rustup/
+.cargo-home/
 node_modules/
+desktop/node_modules/
+desktop/.vite/
+desktop/out/
+desktop/out-*/
+desktop/.tmp/
+desktop/dist/
+desktop/.env
+desktop/.env.*
+!desktop/.env.example
 .vscode/
 .idea/
 *.swp
@@ -47,6 +59,8 @@ docs/*.pdf
 # Note: Cargo.lock is intentionally NOT ignored for reproducible builds
 
 # Local dev scripts and temp files
+/index.html
+/main.js
 *.sh
 !scripts/**
 !.github/scripts/**

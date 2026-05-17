@@ -226,6 +226,7 @@ pub enum Event {
         id: String,
         tool_name: String,
         description: String,
+        input: Value,
         /// Exact-argument fingerprint, used to scope *denials* (#1617).
         approval_key: String,
         /// Lossy / arity-aware fingerprint, used to scope *approvals* so an

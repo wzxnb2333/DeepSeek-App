@@ -533,6 +533,9 @@ struct ServeArgs {
     /// Disable runtime API auth when no token is configured. Only use on a trusted loopback.
     #[arg(long = "insecure")]
     insecure_no_auth: bool,
+    /// Emit one machine-readable startup JSON line for desktop supervisors.
+    #[arg(long = "startup-json")]
+    startup_json: bool,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -860,6 +863,8 @@ async fn main() -> Result<()> {
                             cors_origins,
                             auth_token: args.auth_token,
                             insecure_no_auth: args.insecure_no_auth,
+                            startup_json: args.startup_json,
+                            config_path: cli.config.clone(),
                         },
                     )
                     .await

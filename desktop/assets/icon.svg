@@ -1,0 +1,19 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="DeepSeek App icon">
+  <defs>
+    <linearGradient id="surface" x1="48" y1="20" x2="208" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2a2d33"/>
+      <stop offset="1" stop-color="#090b0e"/>
+    </linearGradient>
+    <linearGradient id="mark" x1="73" y1="61" x2="184" y2="191" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#aeb6c3"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#050608"/>
+  <rect x="18" y="18" width="220" height="220" rx="45" fill="url(#surface)" stroke="#545b66" stroke-width="4"/>
+  <path d="M74 83c0-14 11-25 25-25h36c38 0 66 28 66 70s-28 70-66 70H99c-14 0-25-11-25-25V83zm36 8v74h24c20 0 33-14 33-37s-13-37-33-37h-24z" fill="url(#mark)"/>
+  <path d="M63 126h55M138 126h55M126 63v55M126 138v55" stroke="#d7dce5" stroke-width="10" stroke-linecap="round" opacity=".78"/>
+  <circle cx="126" cy="126" r="19" fill="#11151b" stroke="#ffffff" stroke-width="7"/>
+  <circle cx="194" cy="62" r="10" fill="#ffffff" opacity=".88"/>
+  <circle cx="62" cy="194" r="8" fill="#9da7b6" opacity=".75"/>
+</svg>

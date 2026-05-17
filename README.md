@@ -70,6 +70,23 @@ cargo install deepseek-tui     --locked --force
 
 ---
 
+## Windows Desktop App
+
+This repository also includes a Windows x64 desktop workbench under
+[`desktop/`](desktop/). The desktop app is packaged with the same Rust runtime
+used by the terminal entry point, so end users can install it without a Rust or
+Node toolchain.
+
+![DeepSeek App screenshot](desktop/docs/screenshot-main.png)
+
+Download the Windows installer or portable ZIP from
+[GitHub Releases](https://github.com/wzxnb2333/DeepSeek-TUI/releases), then open
+the app, add a local project, and configure your provider/key source in
+Settings. The desktop README has the full install, build, packaging, and
+release checklist: [desktop/README.md](desktop/README.md).
+
+---
+
 ## What Is It?
 
 DeepSeek TUI is a coding agent that runs in your terminal. It can read and edit files, run shell commands, search the web, manage git, and coordinate sub-agents from a keyboard-driven TUI.

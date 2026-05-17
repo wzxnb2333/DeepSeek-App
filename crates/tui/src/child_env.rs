@@ -549,17 +549,19 @@ mod tests {
 
         assert!(
             env.iter()
-                .any(|(key, value)| key == "LIB" && value == r"C:\sdk\lib"),
+                .any(|(key, value)| { normalize_key(key) == "LIB" && value == r"C:\sdk\lib" }),
             "child env should preserve LIB"
         );
         assert!(
-            env.iter()
-                .any(|(key, value)| key == "INCLUDE" && value == r"C:\sdk\include"),
+            env.iter().any(|(key, value)| {
+                normalize_key(key) == "INCLUDE" && value == r"C:\sdk\include"
+            }),
             "child env should preserve INCLUDE"
         );
         assert!(
-            env.iter()
-                .any(|(key, value)| key == "WINDOWSSDKDIR" && value == r"C:\sdk"),
+            env.iter().any(|(key, value)| {
+                normalize_key(key) == "WINDOWSSDKDIR" && value == r"C:\sdk"
+            }),
             "child env should preserve WINDOWSSDKDIR"
         );
     }

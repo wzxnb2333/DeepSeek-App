@@ -1,0 +1,13 @@
+diff --git a/node_modules/electron-winstaller/lib/sign.js b/node_modules/electron-winstaller/lib/sign.js
+index fa3a69d..287cbc7 100644
+--- a/node_modules/electron-winstaller/lib/sign.js
++++ b/node_modules/electron-winstaller/lib/sign.js
+@@ -128,7 +128,7 @@ function resetSignTool() {
+         return __generator(this, function (_a) {
+             switch (_a.label) {
+                 case 0:
+-                    if (!fs_extra_1.default.existsSync(BACKUP_SIGN_TOOL_PATH)) return [3 /*break*/, 3];
++                    if (typeof BACKUP_SIGN_TOOL_PATH !== 'string' || !BACKUP_SIGN_TOOL_PATH || !fs_extra_1.default.existsSync(BACKUP_SIGN_TOOL_PATH)) return [3 /*break*/, 3];
+                     // Reset the backup of signtool.exe
+                     return [4 /*yield*/, fs_extra_1.default.copy(BACKUP_SIGN_TOOL_PATH, ORIGINAL_SIGN_TOOL_PATH, { overwrite: true })];
+                 case 1:

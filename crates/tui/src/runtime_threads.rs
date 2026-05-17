@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -246,7 +246,7 @@ impl RuntimeThreadStore {
 
         let state_path = root.join("state.json");
         let state = if state_path.exists() {
-            let raw = fs::read_to_string(&state_path)
+            let raw = read_json_text(&state_path)
                 .with_context(|| format!("Failed to read {}", state_path.display()))?;
             serde_json::from_str::<RuntimeStoreState>(&raw)
                 .with_context(|| format!("Failed to parse {}", state_path.display()))?
@@ -287,6 +287,14 @@ impl RuntimeThreadStore {
         Self::record_path(&self.events_dir, thread_id, "jsonl", "thread id")
     }
 
+    fn remove_file_if_exists(path: &Path) -> Result<()> {
+        match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(err).with_context(|| format!("Failed to delete {}", path.display())),
+        }
+    }
+
     pub fn save_thread(&self, thread: &ThreadRecord) -> Result<()> {
         write_json_atomic(&self.thread_path(&thread.id)?, thread)
     }
@@ -303,7 +311,7 @@ impl RuntimeThreadStore {
 
     pub fn load_thread(&self, thread_id: &str) -> Result<ThreadRecord> {
         let path = self.thread_path(thread_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_json_text(&path)
             .with_context(|| format!("Failed to read thread {}", path.display()))?;
         let record: ThreadRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse thread {}", path.display()))?;
@@ -319,7 +327,7 @@ impl RuntimeThreadStore {
 
     pub fn load_turn(&self, turn_id: &str) -> Result<TurnRecord> {
         let path = self.turn_path(turn_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_json_text(&path)
             .with_context(|| format!("Failed to read turn {}", path.display()))?;
         let record: TurnRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse turn {}", path.display()))?;
@@ -335,7 +343,7 @@ impl RuntimeThreadStore {
 
     pub fn load_item(&self, item_id: &str) -> Result<TurnItemRecord> {
         let path = self.item_path(item_id)?;
-        let raw = fs::read_to_string(&path)
+        let raw = read_json_text(&path)
             .with_context(|| format!("Failed to read item {}", path.display()))?;
         let record: TurnItemRecord = serde_json::from_str(&raw)
             .with_context(|| format!("Failed to parse item {}", path.display()))?;
@@ -359,7 +367,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_json_text(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let thread: ThreadRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -387,7 +395,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_json_text(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let turn: TurnRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -417,7 +425,7 @@ impl RuntimeThreadStore {
             if path.extension().is_none_or(|ext| ext != "json") {
                 continue;
             }
-            let raw = fs::read_to_string(&path)
+            let raw = read_json_text(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
             let item: TurnItemRecord = serde_json::from_str(&raw)
                 .with_context(|| format!("Failed to parse {}", path.display()))?;
@@ -438,6 +446,20 @@ impl RuntimeThreadStore {
             left.cmp(&right)
         });
         Ok(out)
+    }
+
+    pub fn delete_thread_tree(&self, thread_id: &str) -> Result<ThreadRecord> {
+        let thread = self.load_thread(thread_id)?;
+        let turns = self.list_turns_for_thread(thread_id)?;
+        for turn in &turns {
+            for item in self.list_items_for_turn(&turn.id)? {
+                Self::remove_file_if_exists(&self.item_path(&item.id)?)?;
+            }
+            Self::remove_file_if_exists(&self.turn_path(&turn.id)?)?;
+        }
+        Self::remove_file_if_exists(&self.events_path(thread_id)?)?;
+        Self::remove_file_if_exists(&self.thread_path(thread_id)?)?;
+        Ok(thread)
     }
 
     pub async fn append_event(
@@ -608,6 +630,8 @@ pub struct StartTurnRequest {
     pub allow_shell: Option<bool>,
     pub trust_mode: Option<bool>,
     pub auto_approve: Option<bool>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -905,9 +929,10 @@ impl RuntimeThreadManager {
             .mode
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| "agent".to_string());
-        let allow_shell = req.allow_shell.unwrap_or_else(|| self.config.allow_shell());
-        let trust_mode = req.trust_mode.unwrap_or(false);
-        let auto_approve = req.auto_approve.unwrap_or(false);
+        let yolo_mode = is_yolo_mode(&mode);
+        let allow_shell = yolo_mode || req.allow_shell.unwrap_or_else(|| self.config.allow_shell());
+        let trust_mode = yolo_mode || req.trust_mode.unwrap_or(false);
+        let auto_approve = yolo_mode || req.auto_approve.unwrap_or(false);
 
         let thread = ThreadRecord {
             schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,
@@ -1167,6 +1192,21 @@ impl RuntimeThreadManager {
             items,
             latest_seq,
         })
+    }
+
+    pub async fn delete_thread(&self, id: &str) -> Result<ThreadRecord> {
+        let thread = self.get_thread(id).await?;
+        {
+            let mut active = self.active.lock().await;
+            if let Some(state) = active.engines.get(id)
+                && state.active_turn.is_some()
+            {
+                bail!("Thread {id} already has an active turn");
+            }
+            active.engines.remove(id);
+            active.lru.retain(|thread_id| thread_id != id);
+        }
+        self.store.delete_thread_tree(&thread.id)
     }
 
     pub async fn resume_thread(&self, id: &str) -> Result<ThreadRecord> {
@@ -1564,24 +1604,15 @@ impl RuntimeThreadManager {
         )
         .await?;
 
-        {
-            let mut active = self.active.lock().await;
-            let Some(state) = active.engines.get_mut(thread_id) else {
-                bail!("Thread engine not loaded");
-            };
-            state.active_turn = Some(ActiveTurnState {
-                turn_id: turn_id.clone(),
-                interrupt_requested: false,
-                auto_approve: req.auto_approve.unwrap_or(thread.auto_approve),
-                trust_mode: req.trust_mode.unwrap_or(thread.trust_mode),
-            });
-            touch_lru(&mut active.lru, thread_id);
-        }
-
-        let mode = parse_mode(req.mode.as_deref().unwrap_or(&thread.mode));
+        let requested_mode = req.mode.clone().unwrap_or_else(|| thread.mode.clone());
+        let mode = parse_mode(&requested_mode);
+        let yolo_mode = matches!(mode, AppMode::Yolo);
         let requested_model = req.model.unwrap_or_else(|| thread.model.clone());
+        let requested_reasoning_effort = req
+            .reasoning_effort
+            .filter(|effort| !effort.trim().is_empty());
         let auto_model = requested_model.trim().eq_ignore_ascii_case("auto");
-        let (model, reasoning_effort) = if auto_model {
+        let (model, routed_reasoning_effort) = if auto_model {
             let selection = crate::commands::resolve_auto_route_with_flash(
                 &self.config,
                 &prompt,
@@ -1599,9 +1630,27 @@ impl RuntimeThreadManager {
         } else {
             (requested_model, None)
         };
-        let allow_shell = req.allow_shell.unwrap_or(thread.allow_shell);
-        let trust_mode = req.trust_mode.unwrap_or(thread.trust_mode);
-        let auto_approve = req.auto_approve.unwrap_or(thread.auto_approve);
+        let reasoning_effort = requested_reasoning_effort
+            .or(routed_reasoning_effort)
+            .or_else(|| self.config.reasoning_effort().map(str::to_string));
+        let reasoning_effort_auto = auto_model || reasoning_effort.as_deref() == Some("auto");
+        let allow_shell = yolo_mode || req.allow_shell.unwrap_or(thread.allow_shell);
+        let trust_mode = yolo_mode || req.trust_mode.unwrap_or(thread.trust_mode);
+        let auto_approve = yolo_mode || req.auto_approve.unwrap_or(thread.auto_approve);
+
+        {
+            let mut active = self.active.lock().await;
+            let Some(state) = active.engines.get_mut(thread_id) else {
+                bail!("Thread engine not loaded");
+            };
+            state.active_turn = Some(ActiveTurnState {
+                turn_id: turn_id.clone(),
+                interrupt_requested: false,
+                auto_approve,
+                trust_mode,
+            });
+            touch_lru(&mut active.lru, thread_id);
+        }
 
         engine
             .send(Op::SendMessage {
@@ -1610,7 +1659,7 @@ impl RuntimeThreadManager {
                 model: model.clone(),
                 goal_objective: None,
                 reasoning_effort,
-                reasoning_effort_auto: auto_model,
+                reasoning_effort_auto,
                 auto_model,
                 allow_shell,
                 trust_mode,
@@ -2639,22 +2688,10 @@ impl RuntimeThreadManager {
                     id,
                     tool_name,
                     description,
+                    input,
+                    approval_key,
                     ..
                 } => {
-                    self.emit_event(
-                        &thread_id,
-                        Some(&turn_id),
-                        None,
-                        "approval.required",
-                        json!({
-                            "id": id,
-                            "approval_id": id,
-                            "tool_name": tool_name,
-                            "description": description,
-                        }),
-                    )
-                    .await?;
-
                     let Some((auto_approve, trust_mode)) =
                         self.active_turn_flags(&thread_id, &turn_id).await
                     else {
@@ -2676,6 +2713,26 @@ impl RuntimeThreadManager {
                     }
 
                     let rx = self.register_pending_approval(&id);
+                    if let Err(err) = self
+                        .emit_event(
+                            &thread_id,
+                            Some(&turn_id),
+                            None,
+                            "approval.required",
+                            json!({
+                                "id": id,
+                                "approval_id": id,
+                                "tool_name": tool_name,
+                                "description": description,
+                                "input": input,
+                                "approval_key": approval_key,
+                            }),
+                        )
+                        .await
+                    {
+                        self.cancel_pending_approval(&id);
+                        return Err(err);
+                    }
                     match tokio::time::timeout(APPROVAL_DECISION_TIMEOUT, rx).await {
                         Ok(Ok(ExternalApprovalDecision::Allow { remember })) => {
                             if remember {
@@ -3107,6 +3164,10 @@ fn parse_mode(mode: &str) -> AppMode {
     }
 }
 
+fn is_yolo_mode(mode: &str) -> bool {
+    matches!(parse_mode(mode), AppMode::Yolo)
+}
+
 fn tool_kind_for_name(name: &str) -> TurnItemKind {
     let lower = name.to_ascii_lowercase();
     if lower == "exec_shell" || lower == "exec_shell_wait" || lower == "exec_shell_interact" {
@@ -3203,6 +3264,11 @@ fn duration_ms(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
     } else {
         u64::try_from(millis).unwrap_or(u64::MAX)
     }
+}
+
+fn read_json_text(path: &Path) -> Result<String> {
+    let raw = fs::read_to_string(path)?;
+    Ok(raw.strip_prefix('\u{feff}').unwrap_or(&raw).to_string())
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
@@ -3379,6 +3445,64 @@ mod tests {
         // Locks the bump in (issue #124). Bump deliberately when persisted
         // shape changes.
         assert_eq!(CURRENT_RUNTIME_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn store_loads_thread_with_utf8_bom() {
+        let dir = test_runtime_dir();
+        let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+        let thread = sample_thread("thr_bom");
+        let path = store.threads_dir.join(format!("{}.json", thread.id));
+        std::fs::create_dir_all(path.parent().unwrap()).expect("mkdirs");
+        let payload = format!(
+            "\u{feff}{}",
+            serde_json::to_string_pretty(&thread).expect("serialize thread")
+        );
+        std::fs::write(&path, payload).expect("write thread");
+
+        let loaded = store.load_thread(&thread.id).expect("load thread");
+        assert_eq!(loaded.id, thread.id);
+        assert_eq!(store.list_threads().expect("list threads").len(), 1);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn store_delete_thread_tree_removes_related_records() {
+        let dir = test_runtime_dir();
+        let store = RuntimeThreadStore::open(dir.clone()).expect("open store");
+        let thread = sample_thread("thr_delete");
+        let turn = sample_turn(&thread.id, "turn_delete", RuntimeTurnStatus::Completed);
+        let item = sample_item(&turn.id, "item_delete", TurnItemLifecycleStatus::Completed);
+        store.save_thread(&thread).expect("save thread");
+        store.save_turn(&turn).expect("save turn");
+        store.save_item(&item).expect("save item");
+        store
+            .append_event(
+                &thread.id,
+                Some(&turn.id),
+                Some(&item.id),
+                "message.delta",
+                json!({ "content": "done" }),
+            )
+            .await
+            .expect("append event");
+
+        let thread_path = store.thread_path(&thread.id).expect("thread path");
+        let turn_path = store.turn_path(&turn.id).expect("turn path");
+        let item_path = store.item_path(&item.id).expect("item path");
+        let events_path = store.events_path(&thread.id).expect("events path");
+        let deleted = store
+            .delete_thread_tree(&thread.id)
+            .expect("delete thread tree");
+
+        assert_eq!(deleted.id, thread.id);
+        assert!(!thread_path.exists());
+        assert!(!turn_path.exists());
+        assert!(!item_path.exists());
+        assert!(!events_path.exists());
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -3668,6 +3792,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -3723,6 +3848,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn create_thread_yolo_forces_auto_approval_policy() -> Result<()> {
+        let manager = test_manager(test_runtime_dir())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: None,
+                mode: Some("yolo".to_string()),
+                allow_shell: Some(false),
+                trust_mode: Some(false),
+                auto_approve: Some(false),
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+            })
+            .await?;
+
+        assert!(thread.allow_shell);
+        assert!(thread.trust_mode);
+        assert!(thread.auto_approve);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn start_turn_passes_effective_auto_approve_to_engine() -> Result<()> {
         let manager = test_manager(test_runtime_dir())?;
         let thread = manager
@@ -3753,6 +3901,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: Some(true),
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -3761,6 +3910,72 @@ mod tests {
             Some(Op::SendMessage { auto_approve, .. }) => assert!(auto_approve),
             other => panic!("expected SendMessage op, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_turn_yolo_forces_auto_approval_policy() -> Result<()> {
+        let manager = test_manager(test_runtime_dir())?;
+        let thread = manager
+            .create_thread(CreateThreadRequest {
+                model: None,
+                workspace: None,
+                mode: None,
+                allow_shell: Some(false),
+                trust_mode: Some(false),
+                auto_approve: Some(false),
+                archived: false,
+                system_prompt: None,
+                task_id: None,
+            })
+            .await?;
+
+        let harness = install_mock_engine(&manager, &thread.id).await;
+        let mut rx_op = harness.rx_op;
+
+        let _turn = manager
+            .start_turn(
+                &thread.id,
+                StartTurnRequest {
+                    prompt: "run without approval".to_string(),
+                    input_summary: None,
+                    model: None,
+                    mode: Some("yolo".to_string()),
+                    allow_shell: Some(false),
+                    trust_mode: Some(false),
+                    auto_approve: Some(false),
+                    reasoning_effort: None,
+                },
+            )
+            .await?;
+
+        match rx_op.recv().await {
+            Some(Op::SendMessage {
+                mode,
+                allow_shell,
+                trust_mode,
+                auto_approve,
+                approval_mode,
+                ..
+            }) => {
+                assert_eq!(mode, AppMode::Yolo);
+                assert!(allow_shell);
+                assert!(trust_mode);
+                assert!(auto_approve);
+                assert_eq!(approval_mode, crate::tui::approval::ApprovalMode::Auto);
+            }
+            other => panic!("expected SendMessage op, got {other:?}"),
+        }
+
+        let active = manager.active.lock().await;
+        let active_turn = active
+            .engines
+            .get(&thread.id)
+            .and_then(|state| state.active_turn.as_ref())
+            .expect("active turn should be tracked");
+        assert!(active_turn.auto_approve);
+        assert!(active_turn.trust_mode);
 
         Ok(())
     }
@@ -3796,6 +4011,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: Some(false),
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -3963,6 +4179,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -3980,6 +4197,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4067,6 +4285,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4134,6 +4353,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: Some(true),
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4159,6 +4379,7 @@ mod tests {
                 id: "tool_stale".to_string(),
                 tool_name: "exec_command".to_string(),
                 description: "stale approval".to_string(),
+                input: json!({"command":"stale-command"}),
             })
             .await?;
 
@@ -4216,6 +4437,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4232,6 +4454,7 @@ mod tests {
                 id: "tool_external_allow".to_string(),
                 tool_name: "exec_command".to_string(),
                 description: "external allow".to_string(),
+                input: json!({"command":"cargo test","cwd":"E:\\repo"}),
             })
             .await?;
 
@@ -4240,6 +4463,23 @@ mod tests {
             sleep(Duration::from_millis(20)).await;
         }
         assert_eq!(manager.pending_approvals_count(), 1);
+        let events = manager.events_since(&thread.id, None)?;
+        let approval = events
+            .iter()
+            .find(|event| event.event == "approval.required")
+            .context("missing approval.required event")?;
+        assert_eq!(
+            approval
+                .payload
+                .get("input")
+                .and_then(|input| input.get("command"))
+                .and_then(Value::as_str),
+            Some("cargo test")
+        );
+        assert_eq!(
+            approval.payload.get("approval_key").and_then(Value::as_str),
+            Some("key1")
+        );
 
         assert!(manager.deliver_external_approval(
             "tool_external_allow",
@@ -4293,6 +4533,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4309,6 +4550,7 @@ mod tests {
                 id: "tool_external_deny".to_string(),
                 tool_name: "exec_command".to_string(),
                 description: "external deny".to_string(),
+                input: json!({"command":"npm test"}),
             })
             .await?;
 
@@ -4369,6 +4611,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: Some(true),
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4479,6 +4722,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4495,6 +4739,7 @@ mod tests {
                 id: "tool_remember".to_string(),
                 tool_name: "exec_command".to_string(),
                 description: "remember=true".to_string(),
+                input: json!({"command":"cargo build"}),
             })
             .await?;
 
@@ -4553,6 +4798,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: Some(true),
                     auto_approve: Some(true),
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4676,6 +4922,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;
@@ -4822,6 +5069,7 @@ mod tests {
                     allow_shell: None,
                     trust_mode: None,
                     auto_approve: None,
+                    reasoning_effort: None,
                 },
             )
             .await?;

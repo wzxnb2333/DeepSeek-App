@@ -1694,6 +1694,7 @@ async fn run_event_loop(
                         id,
                         tool_name,
                         description,
+                        input,
                         approval_key,
                         approval_grouping_key,
                     } => {
@@ -1743,7 +1744,7 @@ async fn run_event_loop(
                                 .iter()
                                 .find(|(tool_id, _, _)| tool_id == &id)
                                 .map(|(_, _, input)| input.clone())
-                                .unwrap_or_else(|| serde_json::json!({}));
+                                .unwrap_or_else(|| input.clone());
 
                             if tool_name == "apply_patch" {
                                 maybe_add_patch_preview(app, &tool_input);
@@ -6427,7 +6428,6 @@ fn push_keyboard_enhancement_flags<W: Write>(writer: &mut W) {
                 "PushKeyboardEnhancementFlags direct write failed on Windows"
             );
         }
-        return;
     }
     #[cfg(not(windows))]
     if let Err(err) = execute!(
@@ -6459,7 +6459,6 @@ pub(crate) fn pop_keyboard_enhancement_flags<W: Write>(writer: &mut W) {
                 "PopKeyboardEnhancementFlags direct write failed on Windows"
             );
         }
-        return;
     }
     #[cfg(not(windows))]
     let _ = execute!(writer, PopKeyboardEnhancementFlags);

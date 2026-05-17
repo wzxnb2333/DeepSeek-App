@@ -1,0 +1,53 @@
+{
+  "name": "deepseek-app",
+  "version": "0.1.0",
+  "private": true,
+  "productName": "DeepSeek App",
+  "description": "Windows desktop workbench for DeepSeek TUI runtime",
+  "author": "DeepSeek TUI contributors",
+  "main": ".vite/build/main.js",
+  "scripts": {
+    "dev": "electron-forge start",
+    "start": "electron-forge start",
+    "build": "vite build --config vite.renderer.config.ts",
+    "postinstall": "patch-package",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint \"src/**/*.{ts,tsx}\" \"*.config.ts\" --max-warnings=0",
+    "test": "vitest run",
+    "package:win": "electron-forge package --platform=win32 --arch=x64",
+    "make:win": "electron-forge make --platform=win32 --arch=x64",
+    "verify:rust": "powershell -ExecutionPolicy Bypass -File scripts/verify-rust-workspace.ps1",
+    "smoke:ui": "powershell -ExecutionPolicy Bypass -File scripts/capture-ui-suite.ps1",
+    "verify:package": "powershell -ExecutionPolicy Bypass -File scripts/verify-package-artifacts.ps1",
+    "verify:make": "powershell -ExecutionPolicy Bypass -File scripts/verify-package-artifacts.ps1 -RequireMake",
+    "smoke:runtime": "node scripts/runtime-smoke.mjs",
+    "smoke:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/sidecar-restart-smoke.ps1",
+    "smoke:installer": "powershell -ExecutionPolicy Bypass -File scripts/installer-smoke.ps1",
+    "verify:release": "powershell -ExecutionPolicy Bypass -File scripts/verify-release.ps1"
+  },
+  "dependencies": {
+    "@electron-forge/maker-squirrel": "7.11.1",
+    "@electron-forge/maker-zip": "7.11.1",
+    "@electron-forge/plugin-vite": "7.11.1",
+    "electron-squirrel-startup": "1.0.1",
+    "lucide-react": "1.16.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6"
+  },
+  "devDependencies": {
+    "@electron-forge/cli": "7.11.1",
+    "@eslint/js": "10.0.1",
+    "@types/node": "24.12.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.1",
+    "electron": "42.0.1",
+    "eslint": "10.3.0",
+    "globals": "17.6.0",
+    "patch-package": "^8.0.1",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.59.3",
+    "vite": "8.0.12",
+    "vitest": "4.1.6"
+  }
+}

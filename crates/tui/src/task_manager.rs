@@ -466,6 +466,7 @@ impl TaskExecutor for EngineTaskExecutor {
                     allow_shell: Some(task.allow_shell),
                     trust_mode: Some(task.trust_mode),
                     auto_approve: Some(task.auto_approve),
+                    reasoning_effort: None,
                 },
             )
             .await
@@ -953,6 +954,34 @@ impl TaskManager {
             .get(&id)
             .cloned()
             .ok_or_else(|| anyhow!("Task not found: {id}"))
+    }
+
+    /// Delete a queued or terminal task from local task history.
+    pub async fn delete_task(&self, id_or_prefix: &str) -> Result<TaskRecord> {
+        let mut state = self.state.lock().await;
+        let id = resolve_task_id(&state.tasks, id_or_prefix)?;
+        let task = state
+            .tasks
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| anyhow!("Task not found: {id}"))?;
+        if task.status == TaskStatus::Running {
+            bail!("Cannot delete running task: {id}");
+        }
+
+        state.queue.retain(|queued_id| queued_id != &id);
+        state.tasks.remove(&id);
+        self.persist_queue_locked(&state.queue)?;
+        let path = self.tasks_dir.join(format!("{}.json", id));
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Failed to delete task file {}", path.display()));
+            }
+        }
+        Ok(task)
     }
 
     /// Return aggregate status counters.

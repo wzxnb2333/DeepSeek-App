@@ -65,6 +65,16 @@ cargo install deepseek-tui     --locked --force
 
 ---
 
+## Windows 桌面版
+
+本仓库现在包含 Windows x64 桌面工作台，源码位于 [`desktop/`](desktop/)。桌面版会捆绑同一套 Rust runtime，普通用户不需要安装 Rust、Node 或命令行工具。
+
+![DeepSeek App 截图](desktop/docs/screenshot-main.png)
+
+普通用户从 [GitHub Releases](https://github.com/wzxnb2333/DeepSeek-TUI/releases) 下载安装包或便携 ZIP，启动后添加本地项目，并在设置中配置 provider、模型和密钥来源。完整安装、开发、打包和发布说明见 [desktop/README.md](desktop/README.md)。
+
+---
+
 ## 这是什么？
 
 DeepSeek TUI 是一个完全运行在终端里的编程智能体。它让 DeepSeek 前沿模型直接访问你的工作区：读写文件、运行 shell 命令、搜索浏览网页、管理 git、调度子智能体——全部通过快速、键盘驱动的 TUI 完成。
