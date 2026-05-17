@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "productName": "DeepSeek App",
-  "description": "Windows desktop workbench for DeepSeek TUI runtime",
-  "author": "DeepSeek TUI contributors",
+  "description": "Windows desktop workbench for local DeepSeek agent workflows",
+  "author": "DeepSeek App contributors",
   "main": ".vite/build/main.js",
   "scripts": {
     "dev": "electron-forge start",

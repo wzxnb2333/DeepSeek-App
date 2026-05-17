@@ -18,7 +18,7 @@ module.exports = {
       name: "@electron-forge/maker-squirrel",
       config: {
         name: "deepseek_app",
-        authors: "DeepSeek TUI contributors",
+        authors: "DeepSeek App contributors",
         exe: "deepseek-app.exe",
         setupIcon: path.resolve(__dirname, "assets", "icon.ico"),
         setupExe: "DeepSeekAppSetup.exe"
