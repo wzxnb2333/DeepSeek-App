@@ -1,6 +1,6 @@
 # DeepSeek App
 
-DeepSeek App 是一个面向 Windows 的本地智能体桌面工作台。它把项目、线程、流式回复、工具审批、任务、自动化、MCP、技能、用量和运行日志放进一个桌面界面里，底层复用本仓库的 Rust runtime，不把 provider 密钥放进前端状态或源码。
+DeepSeek App 是一个面向 Windows 的本地智能体桌面工作台。它把项目、线程、流式回复、工具审批、任务、自动化、MCP、技能、用量和运行日志放进一个桌面界面里，底层复用本仓库的 Rust runtime。
 
 ![DeepSeek App screenshot](desktop/docs/screenshot-main.png)
 
